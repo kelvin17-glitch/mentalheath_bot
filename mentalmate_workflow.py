@@ -13,6 +13,8 @@ Original file is located at
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 import torch
 import torch.nn.functional as F
+import random
+from collections import deque
 
 # Define intent keywords
 intent_keywords = {
@@ -23,15 +25,31 @@ intent_keywords = {
 }
 # Define personas
 personas = {
-    "Zen_guide": "You are a Zen Guide. You offer calm and mindful responses. Your objective is to offer advice on how to achieve inner peace through meditation and reflection.",
-    "Cheerful_companion": " You are an uplifting friend who brings positivity and encouragement to brighten one's day.",
-    "Wise_owl": "You are a thoughtful mentor offering deep insights and practical wisdom for life's challenges.",
-    "Gentle_soul": "You are a tender, empathetic listener who provides comfort during difficult times.",
-    "Resilient_warrior": "You are a strong, determined guide who helps one build courage and overcome obstacles.",
-    "Balanced_soul": "You are a harmonious presence that helps one find equilibrium in all aspects of life."
+    "Zen_guide": "You are MentalMate, a Zen Guide. You offer calm and mindful responses. Your objective is to offer advice on how to achieve inner peace through meditation and reflection.",
+    "Cheerful_companion": " You are MentalMate, an uplifting friend who brings positivity and encouragement to brighten one's day.",
+    "Wise_owl": "You are MentalMate, a thoughtful mentor offering deep insights and practical wisdom for life's challenges.",
+    "Gentle_soul": "You are MentalMate, a tender, empathetic listener who provides comfort during difficult times.",
+    "Resilient_warrior": "You are MentalMate, a strong, determined guide who helps one build courage and overcome obstacles.",
+    "Balanced_soul": "You are MentalMate, a harmonious presence that helps one find equilibrium in all aspects of life."
 }
 
-# Receive user input
+# Sample RAG knowledge base
+knowledge_snippets = {
+    "anxiety": "Anxiety often stems from uncertainty. Practicing deep breathing or journaling can help.",
+    "loneliness": "You're not alone in feeling this way. Try connecting with a friend or joining a support group.",
+    "burnout": "Burnout requires rest. It's okay to take breaks and reset boundaries.",
+    "motivation": "Motivation fluctuates. Small wins each day can rebuild momentum."
+}
+
+# Context tracking (deque with maxlen 3)
+conversation_history = deque(maxlen=3)
+
+# User profiling (stores recent emotions)
+user_profile = {
+    "recent_emotions": deque(maxlen=5)
+}
+
+# Chat loop (for single iteration)
 user_input = input("How are you feeling today? ")
 persona = input("Choose a persona (Zen_guide, Cheerful_companion, Wise_owl, Gentle_soul, Resilient_warrior, Balanced_soul): ")
 
@@ -44,21 +62,55 @@ def detect_intent(text):
   return "general_chat"
 intent = detect_intent(user_input)
 
-# Load tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained('nateraw/bert-base-uncased-emotion')
-model = AutoModelForSequenceClassification.from_pretrained('nateraw/bert-base-uncased-emotion')
+# Simple RAG lookup
+def retrieve_knowledge(text):
+    for keyword in knowledge_snippets:
+        if keyword in text.lower():
+            return knowledge_snippets[keyword]
+    return ""
+
+# Prompt builder
+def build_prompt(persona_name, persona_description, emotion, intent, user_input, rag, context):
+    history_str = "\n".join(context)
+    prompt = f"""
+### Role: {persona_name}
+{persona_description}
+
+### User Emotion: {emotion}
+### User Intent: {intent}
+### Relevant Info: {rag}
+
+### Recent Conversation:
+{history_str}
+
+### User: {user_input}
+### Chatbot:"""
+    return prompt.strip()
+
+# Emotion detection
+def detect_emotion(text):
+    inputs = emotion_tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = emotion_model(**inputs)
+    probs = F.softmax(outputs.logits, dim=1)
+    pred = torch.argmax(probs, dim=1).item()
+    return emotion_model.config.id2label[pred]
+
+# Load emotion tokenizer and model
+emotion_tokenizer = AutoTokenizer.from_pretrained('nateraw/bert-base-uncased-emotion')
+emotion_model = AutoModelForSequenceClassification.from_pretrained('nateraw/bert-base-uncased-emotion')
 
 # Preprocess input
-inputs = tokenizer(user_input, return_tensors="pt")
+inputs = emotion_tokenizer(user_input, return_tensors="pt")
 
 # Run through the model
 with torch.no_grad():
-  outputs = model(**inputs)
+  outputs = emotion_model(**inputs)
 
 # Get emotion probabilities
 probs = F.softmax(outputs.logits, dim=1)
 predicted_emotion = torch.argmax(probs, dim=1).item()
-emotion_label = model.config.id2label[predicted_emotion]
+emotion_label = emotion_model.config.id2label[predicted_emotion]
 
 """TEXT GENERATION"""
 
@@ -67,24 +119,37 @@ tokenizer = AutoTokenizer.from_pretrained("openchat/openchat-3.5-0106")
 model = AutoModelForCausalLM.from_pretrained("openchat/openchat-3.5-0106")
 
 # Simulated results from previous modules
-emotion = emotion_label
+intent = detect_intent(user_input)
+emotion = detect_emotion(user_input)
+user_profile["recent_emotions"].append(emotion)
+retrieved_info = retrieve_knowledge(user_input)
 
-# Build custom prompt
-prompt = f"{personas[persona]} I am feeling {emotion}. {user_input}"
+# Build prompt
+prompt = build_prompt(
+    persona,
+    personas[persona],
+    emotion,
+    intent,
+    user_input,
+    retrieved_info,
+    list(conversation_history)
+)
 
 # Tokenize and generate
-inputs = tokenizer(prompt, return_tensors="pt")
+inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
 output = model.generate(
     **inputs,
     max_new_tokens=150,
-    eos_token_id=tokenizer.eos_token_id,
     do_sample=True,
     top_k=50,
     top_p=0.95,
+    attention_mask=inputs["attention_mask"],
+    eos_token_id=tokenizer.eos_token_id,
 )
 
 # Decode the response
 response = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+
 # Catch incomplete output
 if not response.strip().endswith(('.', '!', '?')):
     # Assume it's incomplete
@@ -92,6 +157,10 @@ if not response.strip().endswith(('.', '!', '?')):
     next_output = model.generate(continue_prompt)
     output = output + next_output
     response = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+
+# Update conversation context
+conversation_history.append(f"User: {user_input}")
+conversation_history.append(f"Chatbot: {response.strip()}")
 
 # Extract only bot's response
 print(response.strip())
