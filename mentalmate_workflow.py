@@ -49,10 +49,6 @@ user_profile = {
     "recent_emotions": deque(maxlen=5)
 }
 
-# Chat loop (for single iteration)
-user_input = input("How are you feeling today? ")
-persona = input("Choose a persona (Zen_guide, Cheerful_companion, Wise_owl, Gentle_soul, Resilient_warrior, Balanced_soul): ")
-
 # Intent detection
 def detect_intent(text):
   text = text.lower()
@@ -100,67 +96,69 @@ def detect_emotion(text):
 emotion_tokenizer = AutoTokenizer.from_pretrained('nateraw/bert-base-uncased-emotion')
 emotion_model = AutoModelForSequenceClassification.from_pretrained('nateraw/bert-base-uncased-emotion')
 
-# Preprocess input
-inputs = emotion_tokenizer(user_input, return_tensors="pt")
-
-# Run through the model
-with torch.no_grad():
-  outputs = emotion_model(**inputs)
-
-# Get emotion probabilities
-probs = F.softmax(outputs.logits, dim=1)
-predicted_emotion = torch.argmax(probs, dim=1).item()
-emotion_label = emotion_model.config.id2label[predicted_emotion]
-
 """TEXT GENERATION"""
 
 # Load the generator
 tokenizer = AutoTokenizer.from_pretrained("openchat/openchat-3.5-0106")
 model = AutoModelForCausalLM.from_pretrained("openchat/openchat-3.5-0106")
 
-# Simulated results from previous modules
-intent = detect_intent(user_input)
-emotion = detect_emotion(user_input)
-user_profile["recent_emotions"].append(emotion)
-retrieved_info = retrieve_knowledge(user_input)
+# Choose persona once
+persona = input("Choose a persona (Zen_guide, Cheerful_companion, Wise_owl, Gentle_soul, Resilient_warrior, Balanced_soul)")
+# Avoid Exceptions
+if persona is None:
+  persona = random.choice(list(personas.keys()))
+  print(f"Selected persona: {persona}")
 
-# Build prompt
-prompt = build_prompt(
-    persona,
-    personas[persona],
-    emotion,
-    intent,
-    user_input,
-    retrieved_info,
-    list(conversation_history)
-)
+# Chat loop
+print("\nType 'exit' to end the conversation.\n")
+while True:
+    user_input = input("You: ")
+    if user_input.lower() == 'exit':
+      print("Chatbot: Goodbye! Take care 💙")
+      break
 
-# Tokenize and generate
-inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-output = model.generate(
-    **inputs,
-    max_new_tokens=150,
-    do_sample=True,
-    top_k=50,
-    top_p=0.95,
-    attention_mask=inputs["attention_mask"],
-    eos_token_id=tokenizer.eos_token_id,
-)
+    intent = detect_intent(user_input)
+    emotion = detect_emotion(user_input)
+    user_profile["recent_emotions"].append(emotion)
+    retrieved_info = retrieve_knowledge(user_input)
 
-# Decode the response
-response = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+    # Build prompt
+    prompt = build_prompt(
+        persona,
+        personas[persona],
+        emotion,
+        intent,
+        user_input,
+        retrieved_info,
+        list(conversation_history)
+    )
+    # Tokenize with attention mask
+    inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+    inputs["attention_mask"] = inputs["attention_mask"]
 
-# Catch incomplete output
-if not response.strip().endswith(('.', '!', '?')):
-    # Assume it's incomplete
-    continue_prompt = output + "..."
-    next_output = model.generate(continue_prompt)
-    output = output + next_output
+    # Generate response
+    output = model.generate(
+        **inputs,
+        max_new_tokens=150,
+        do_sample=True,
+        top_k=50,
+        top_p=0.95,
+        attention_mask=inputs["attention_mask"],
+        eos_token_id=tokenizer.eos_token_id,
+    )
+
+    # Decode the response
     response = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
 
-# Update conversation context
-conversation_history.append(f"User: {user_input}")
-conversation_history.append(f"Chatbot: {response.strip()}")
+    # Catch incomplete output
+    if not response.strip().endswith(('.', '!', '?')):
+        # Assume it's incomplete
+        continue_prompt = output + "..."
+        next_output = model.generate(continue_prompt)
+        output = output + next_output
+        response = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+    print(f"Chatbot: {response.strip()}")
 
-# Extract only bot's response
-print(response.strip())
+    # Update conversation context
+    conversation_history.append(f"User: {user_input}")
+    conversation_history.append(f"Chatbot: {response.strip()}")
